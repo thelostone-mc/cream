@@ -14,57 +14,85 @@ const stringifyBigInts: (obj: object) => any = ff.utils.stringifyBigInts
 const unstringifyBigInts: (obj: object) => any = ff.utils.unstringifyBigInts
 
 interface Deposit {
-  commitment: SnarkBigInt,
-  nullifierHash: SnarkBigInt,
-  nullifier: SnarkBigInt,
-  secret: SnarkBigInt
+    commitment: SnarkBigInt,
+    nullifierHash: SnarkBigInt,
+    nullifier: SnarkBigInt,
+    secret: SnarkBigInt
 }
 
 interface CircuitInput {
-  root: SnarkBigInt,
-  nullifierHash: SnarkBigInt,
-  nullifier: SnarkBigInt,
-  relayer: any,
-  recipient: any,
-  fee: any,
-  secret: SnarkBigInt,
-  path_elements: any[any],
-  path_index: any[any]
+    root: SnarkBigInt,
+    nullifierHash: SnarkBigInt,
+    nullifier: SnarkBigInt,
+    relayer: any,
+    recipient: any,
+    fee: any,
+    secret: SnarkBigInt,
+    path_elements: any[any],
+    path_index: any[any]
+}
+
+interface ProcessVoteAccumulator {
+    input: CircuitInput,
+    tree: any
+}
+
+const copyObject = (a: any): any => {
+    if (Array.isArray(a)) {
+        return Array.from(a)
+    }
+    return Object.assign(
+        Object.create(Object.getPrototypeOf(a)),
+        unstringifyBigInts(stringifyBigInts(a))
+    )
 }
 
 const generateVote = (
-  merkleTree: any,
-  index: number,
-  relayer,
-  recipient,
-  fee,
-  length?: number
-): CircuitInput => {
-  // Default value of len
-  const len = length ? length : 31
-
-  // Create deposit
-  const deposit: Deposit = createDeposit(rbigInt(len), rbigInt(len))
-
-  const { commitment, nullifierHash, nullifier, secret } = deposit
-
-  // Update merkleTree
-  merkleTree.insert(commitment)
-  const merkleProof = merkleTree.getPathUpdate(index)
-
-  const input: CircuitInput = {
-    root: merkleTree.root,
-    nullifierHash,
-    nullifier,
+    merkleTree: any,
+    index: number,
     relayer,
     recipient,
     fee,
-    secret: secret,
-    path_elements: merkleProof[0],
-    path_index: merkleProof[1]
-  }
+    length?: number
+): CircuitInput => {
+    // Default value of len
+    const len = length ? length : 31
 
-  return input
+    // Create deposit
+    const deposit: Deposit = createDeposit(rbigInt(len), rbigInt(len))
+
+    const { commitment, nullifierHash, nullifier, secret } = deposit
+
+    // Update merkleTree
+    merkleTree.insert(commitment)
+    const merkleProof = merkleTree.getPathUpdate(index)
+
+    const input: CircuitInput = {
+        root: merkleTree.root,
+        nullifierHash,
+        nullifier,
+        relayer,
+        recipient,
+        fee,
+        secret: secret,
+        path_elements: merkleProof[0],
+        path_index: merkleProof[1]
+    }
+
+    return input
+}
+
+const processVote = (
+    acc: ProcessVoteAccumulator
+): ProcessVoteAccumulator => {
+    const { input, tree } = acc
+
+    // TODO: tree process
+
+    return {
+        input,
+        tree
+    }
 }
 
 const compileAndLoadCircuit = async (
@@ -156,7 +184,10 @@ export {
     SnarkBigInt,
     Deposit,
     CircuitInput,
+    ProcessVoteAccumulator,
     generateVote,
+    processVote,
+    copyObject,
     compileAndLoadCircuit,
     executeCircuit,
     genProofAndPublicSignals,

@@ -10,7 +10,8 @@
     "test": "npx jest",
     "test:merkleTree": "npx jest MerkleTree.test.ts",
     "test:hasher": "jest Hasher.test.ts",
-    "test:vote": "jest Vote.test.ts"
+    "test:vote": "jest Vote.test.ts",
+    "test:batch": "jest BatchVote.test.ts"
   },
   "author": "Kazuaki Ishiguro",
   "license": "ISC",
