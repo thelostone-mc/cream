@@ -155,7 +155,7 @@ const genProofAndPublicSignals = async (
     const publicSignals = unstringifyBigInts(JSON.parse(fs.readFileSync(publicJsonPath).toString()))
     const proof = JSON.parse(fs.readFileSync(proofPath).toString())
 
-    await circuit.checkConstraints(witness)
+    // await circuit.checkConstraints(witness)
 
     // remove files
     execSync(`rm -f ${wtnsPath} `)

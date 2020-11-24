@@ -4,6 +4,7 @@
 *
 */
 pragma solidity >=0.4.21 <0.7.0;
+pragma experimental ABIEncoderV2;
 
 import "./MerkleTreeWithHistory.sol";
 import "./SignUpToken.sol";
@@ -19,6 +20,7 @@ contract Cream is MerkleTreeWithHistory, ERC721Holder, ReentrancyGuard, Ownable 
     mapping(bytes32 => bool) public nullifierHashes;
     mapping(bytes32 => bool) public commitments;
     mapping(address => bool) Recipients;
+	uint8 public batchSize;
     uint256 public denomination;
     address[] public recipients;
     IVerifier public verifier;
@@ -32,12 +34,14 @@ contract Cream is MerkleTreeWithHistory, ERC721Holder, ReentrancyGuard, Ownable 
 	    SignUpToken _signUpToken,
         uint256 _denomination,
         uint32 _merkleTreeHeight,
+		uint8 _batchSize,
         address[] memory _recipients
     ) MerkleTreeWithHistory(_merkleTreeHeight) public {
         require(_denomination > 0, "Denomination should be greater than 0");
         require(_recipients.length > 0, "Recipients number be more than one");
         verifier = _verifier;
 	    signUpToken = _signUpToken;
+		batchSize = _batchSize;
         denomination = _denomination;
         setRecipients(_recipients);
         recipients = _recipients;
@@ -49,7 +53,6 @@ contract Cream is MerkleTreeWithHistory, ERC721Holder, ReentrancyGuard, Ownable 
         signUpToken.safeTransferFrom(msg.sender, address(this), _tokenId);
     }
 
-
     function _processWithdraw(
         address payable _recipient
     ) internal {
@@ -58,7 +61,9 @@ contract Cream is MerkleTreeWithHistory, ERC721Holder, ReentrancyGuard, Ownable 
         signUpToken.safeTransferFrom(address(this), _recipient, _tokenId);
     }
 
-    function deposit(bytes32 _commitment) external payable nonReentrant {
+    function deposit(
+		bytes32 _commitment
+	) external payable nonReentrant {
         require(!commitments[_commitment], "Already submitted");
 	    require(signUpToken.balanceOf(msg.sender) == 1, "Sender does not own appropreate amount of token");
         uint32 insertedIndex = _insert(_commitment);
@@ -67,14 +72,27 @@ contract Cream is MerkleTreeWithHistory, ERC721Holder, ReentrancyGuard, Ownable 
         emit Deposit(_commitment, insertedIndex, block.timestamp);
     }
 
+	function batchWithdraw(
+		bytes[] memory _proof,
+        bytes32[] memory _root,
+        bytes32[] memory _nullifierHash,
+        address payable[] memory _recipient,
+        address payable[] memory  _relayer,
+        uint256[] memory _fee
+	) public payable {
+		for (uint i; i < batchSize; i++) {
+			withdraw(_proof[i], _root[i], _nullifierHash[i], _recipient[i], _relayer[i], _fee[i]);
+		}
+	}
+
     function withdraw(
-        bytes calldata _proof,
+        bytes memory _proof,
         bytes32 _root,
         bytes32 _nullifierHash,
         address payable _recipient,
         address payable _relayer,
         uint256 _fee
-    ) external payable nonReentrant {
+    ) public payable nonReentrant {
         require(_fee <= denomination, "Fee exceeds transfer value");
         require(!nullifierHashes[_nullifierHash], "The note has been already spent");
         require(isKnownRoot(_root), "Cannot find your merkle root");

@@ -19,18 +19,18 @@ template BatchVote(levels, batch_size) {
     component vote[batch_size];
     for (var i = 0; i < batch_size; i++) {
     	vote[i] = Vote(levels);
-	vote[i].root <== root[i];
-	vote[i].nullifierHash <== nullifierHash[i];
-	vote[i].nullifier <== nullifier[i];
-	vote[i].recipient <== recipient[i];
-	vote[i].relayer <== relayer[i];
-	vote[i].fee <== fee[i];
-	vote[i].secret <== secret[i];
+        vote[i].root <== root[i];
+        vote[i].nullifierHash <== nullifierHash[i];
+        vote[i].nullifier <== nullifier[i];
+        vote[i].recipient <== recipient[i];
+        vote[i].relayer <== relayer[i];
+        vote[i].fee <== fee[i];
+        vote[i].secret <== secret[i];
 
-	for (var j = 0; j < levels; j++) {
-	    vote[i].path_elements[j] <== path_elements[i][j];
-	    vote[i].path_index[j] <== path_index[i][j];
-	}
+        for (var j = 0; j < levels; j++) {
+            vote[i].path_elements[j] <== path_elements[i][j];
+            vote[i].path_index[j] <== path_index[i][j];
+        }
     }
 
     // Output: new root hash

@@ -3,10 +3,13 @@ const path = require('path')
 const { toBN, randomHex } = require('web3-utils')
 const { config } = require('cream-config')
 const {
+  compileAndLoadCircuit,
   genProofAndPublicSignals,
   snarkVerify,
   stringifyBigInts,
-  unstringifyBigInts
+  unstringifyBigInts,
+  processVote,
+  executeCircuit
 } = require('cream-circuits')
 
 const {
@@ -30,9 +33,60 @@ const Cream = artifacts.require('./Cream.sol')
 const SignUpToken = artifacts.require('./SignUpToken.sol')
 const Verifier = artifacts.require('./Verifier.sol')
 
-const loadVk = (binName) => {
-  const p = path.join(__dirname, '../../circuits/build/circuits/' + binName + '.bin')
-  return fs.readFileSync(p).buffer
+const arrayBatchSize = [0, 1]
+
+// modified version of from cream-circuit's generatevote()
+const generateVote = (
+  merkleTree,
+  index,
+  relayer,
+  recipient,
+  fee
+) => {
+  // Default value of len
+  const len = 31
+
+  // Create deposit
+  const deposit = createDeposit(rbigInt(len), rbigInt(len))
+
+  const { commitment, nullifierHash, nullifier, secret } = deposit
+
+  // Update merkleTree
+  merkleTree.insert(commitment)
+
+  const merkleProof = merkleTree.getPathUpdate(index)
+
+  const input = {
+    root: toHex(merkleTree.root),
+    nullifierHash: toHex(nullifierHash),
+    nullifier: toHex(nullifier),
+    relayer: toHex(relayer, 20),
+    recipient: toHex(recipient, 20),
+    fee: toHex(fee),
+    secret: secret,
+    path_elements: merkleProof[0],
+    path_index: merkleProof[1]
+  }
+
+  return {
+    input,
+    commitment
+  }
+}
+
+const getLeavesAndEvents = async (
+  instance,
+  blockNumber
+) => {
+  const events = await instance.getPastEvents('Deposit', { fromBlock: blockNumber })
+  // Consolidate commitments in turn
+  const leaves = events
+        .sort((a, b) => a.returnValues.leafIndex - b.returnValues.leafIndex)
+        .map(e => e.returnValues.commitment)
+  return {
+    leaves,
+    events
+  }
 }
 
 const toHex32 = (number) => {
@@ -58,6 +112,7 @@ const toSolidityInput = (proof) =>{
 
 contract('Cream', accounts => {
   let instance
+  let verifier
   let tokenContract
   let snapshotId
   let proving_key
@@ -71,9 +126,9 @@ contract('Cream', accounts => {
   const fee = bigInt(value).shr(0)
   const contractOwner = accounts[0]
   const voter = accounts[1]
-  const relayer = accounts[2]
-  const badUser = accounts[3]
-  const voter2 = accounts[4]
+  const voter2 = accounts[2]
+  const relayer = accounts[3]
+  const badUser = accounts[4]
 
   before(async () => {
     tree = new MerkleTree(
@@ -81,6 +136,7 @@ contract('Cream', accounts => {
       ZERO_VALUE
     )
     instance = await Cream.deployed()
+    verifier = await Verifier.deployed()
     tokenContract = await SignUpToken.deployed()
     snapshotId = await takeSnapshot()
   })
@@ -141,7 +197,7 @@ contract('Cream', accounts => {
     it('should correctly emit event', async () => {
       const deposit = createDeposit(rbigInt(31), rbigInt(31))
       const tx = await instance.deposit(toHex(deposit.commitment), {from: voter})
-      // truffleAssert.prettyPrintEmittedEvents(tx)
+      truffleAssert.prettyPrintEmittedEvents(tx)
       truffleAssert.eventEmitted(tx, 'Deposit')
     })
 
@@ -152,20 +208,17 @@ contract('Cream', accounts => {
     })
 
     it('should be able to find deposit event from commietment', async () => {
+      //voter1 deposit
       const deposit1 = createDeposit(rbigInt(31), rbigInt(31))
       const tx1 = await instance.deposit(toHex(deposit1.commitment), {from: voter})
 
-      // voter 2 deposit
+      //voter2 deposit
       await tokenContract.giveToken(voter2)
       await tokenContract.setApprovalForAll(instance.address, true, { from: voter2 })
       const deposit2 = createDeposit(rbigInt(31), rbigInt(31))
       const tx2 = await instance.deposit(toHex(deposit2.commitment), {from: voter2})
 
-      // TODO : load `gemerateMerkleProof` function from cream-lib
-      const events = await instance.getPastEvents('Deposit', { fromBlock: 0 })
-      const leaves = events
-	    .sort((a, b) => a.returnValues.leafIndex - b.returnValues.leafIndex)
-	    .map(e => e.returnValues.commitment)
+      const { leaves, events } = await getLeavesAndEvents(instance, 0)
 
       for (let i = 0; i < leaves.length; i++) {
         tree.insert(leaves[i])
@@ -180,13 +233,12 @@ contract('Cream', accounts => {
       leafIndex = depositEvent.returnValues.leafIndex
 
       assert.equal(leafIndex, bigInt(tx2.logs[0].args.leafIndex))
-
     })
 
     it('should throw an error for non-token holder', async () => {
       const deposit = createDeposit(rbigInt(31), rbigInt(31))
       try {
-	      await instance.deposit(toHex(deposit.commitment), {from: badUser})
+  	      await instance.deposit(toHex(deposit.commitment), {from: badUser})
       } catch(error) {
         assert.equal(error.reason, 'Sender does not own appropreate amount of token')
         return
@@ -203,7 +255,7 @@ contract('Cream', accounts => {
 
       const deposit = createDeposit(rbigInt(31), rbigInt(31))
       try {
-	      await instance.deposit(toHex(deposit.commitment), {from: badUser})
+  	      await instance.deposit(toHex(deposit.commitment), {from: badUser})
       } catch(error) {
         assert.equal(error.reason, 'Sender does not own appropreate amount of token')
         return
@@ -260,7 +312,7 @@ contract('Cream', accounts => {
       let result = await snarkVerify(proof, publicSignals)
       assert.equal(result, true)
 
-      /* fake public signal */
+      // fake public signal
       publicSignals[0] = '133792158246920651341275668520530514036799294649489851421007411546007850802'
       result = await snarkVerify(proof, publicSignals)
       assert.equal(result, false)
@@ -269,34 +321,40 @@ contract('Cream', accounts => {
 
   describe('withdraw', () => {
     it('should correctly work and emit event', async () => {
+      const circuit = await compileAndLoadCircuit("../../circuits/circom/test/vote_test.circom")
       const deposit = createDeposit(rbigInt(31), rbigInt(31))
-      tree.insert(deposit.commitment)
-      await instance.deposit(toHex(deposit.commitment), { from: voter })
+      const { commitment, nullifierHash, nullifier, secret } = deposit
+
+      tree.insert(commitment)
+      await instance.deposit(toHex(commitment), { from : voter })
+
       const root = tree.root
       const merkleProof = tree.getPathUpdate(0)
+
       const input = {
         root,
-        nullifierHash: pedersenHash(deposit.nullifier.leInt2Buff(31)).babyJubX,
-        relayer: relayer,
+        nullifierHash,
+        nullifier,
+        relayer,
         recipient,
         fee,
-        nullifier: deposit.nullifier,
-        secret: deposit.secret,
+        secret,
         path_elements: merkleProof[0],
-        path_index: merkleProof[1]
-      }
+        path_index: merkleProof[1],
+  	  }
 
       let isSpent = await instance.isSpent(toHex(input.nullifierHash))
       assert.isFalse(isSpent)
 
       const {
-        proof,
+        proof
       } = await genProofAndPublicSignals(
         input,
-        'prod/vote.circom',
+        'test/vote_test.circom',
         'build/vote.zkey',
-        'circuits/vote.wasm'
-      )
+        'circuits/vote.wasm',
+        circuit
+  	  )
 
       const args = [
         toHex(input.root),
@@ -309,10 +367,9 @@ contract('Cream', accounts => {
       const proofForSolidityInput = toSolidityInput(proof)
       const tx = await instance.withdraw(proofForSolidityInput, ...args, { from: relayer })
 
-      // truffleAssert.prettyPrintEmittedEvents(tx)
+      truffleAssert.prettyPrintEmittedEvents(tx)
       truffleAssert.eventEmitted(tx, 'Withdrawal')
 
-      // check if nullifierhash status has changed correctly
       isSpent = await instance.isSpent(toHex(input.nullifierHash))
       assert.isTrue(isSpent)
     })
@@ -337,12 +394,12 @@ contract('Cream', accounts => {
 
       const {
         proof
-	  } = await genProofAndPublicSignals(
+  	  } = await genProofAndPublicSignals(
         input,
-        'prod/vote.circom',
+        'test/vote_test.circom',
         'build/vote.zkey',
         'circuits/vote.wasm'
-	  )
+  	  )
 
       const args = [
         toHex(input.root),
@@ -379,12 +436,12 @@ contract('Cream', accounts => {
 
       const {
         proof,
-	  } = await genProofAndPublicSignals(
+  	  } = await genProofAndPublicSignals(
         input,
-        'prod/vote.circom',
+        'test/vote_test.circom',
         'build/vote.zkey',
         'circuits/vote.wasm'
-	  )
+  	  )
 
       const proofForSolidityInput = toSolidityInput(proof)
 
@@ -426,12 +483,12 @@ contract('Cream', accounts => {
 
       const {
         proof,
-	  } = await genProofAndPublicSignals(
+  	  } = await genProofAndPublicSignals(
         input,
-        'prod/vote.circom',
+        'test/vote_test.circom',
         'build/vote.zkey',
         'circuits/vote.wasm'
-	  )
+  	  )
 
       const proofForSolidityInput = toSolidityInput(proof)
 
@@ -472,12 +529,12 @@ contract('Cream', accounts => {
 
       const {
         proof,
-	  } = await genProofAndPublicSignals(
+  	  } = await genProofAndPublicSignals(
         input,
-        'prod/vote.circom',
+        'test/vote_test.circom',
         'build/vote.zkey',
         'circuits/vote.wasm'
-	  )
+  	  )
 
       const proofForSolidityInput = toSolidityInput(proof)
 
@@ -520,7 +577,7 @@ contract('Cream', accounts => {
         proof,
       } = await genProofAndPublicSignals(
         input,
-        'prod/vote.circom',
+        'test/vote_test.circom',
         'build/vote.zkey',
         'circuits/vote.wasm'
       )
@@ -566,7 +623,7 @@ contract('Cream', accounts => {
         proof,
       } = await genProofAndPublicSignals(
         input,
-        'prod/vote.circom',
+        'test/vote_test.circom',
         'build/vote.zkey',
         'circuits/vote.wasm'
       )
@@ -614,12 +671,12 @@ contract('Cream', accounts => {
 
       const {
         proof
-	  } = await genProofAndPublicSignals(
+  	  } = await genProofAndPublicSignals(
         input,
-        'prod/vote.circom',
+        'test/vote_test.circom',
         'build/vote.zkey',
         'circuits/vote.wasm'
-	  )
+  	  )
 
       const proofForSolidityInput = toSolidityInput(proof)
 
@@ -638,6 +695,80 @@ contract('Cream', accounts => {
         return
       }
       assert.fail('Expected revert not received')
+    })
+  })
+
+    describe('batchVote', () => {
+    it('should correctly work', async () => {
+      await tokenContract.giveToken(voter2)
+      await tokenContract.setApprovalForAll(instance.address, true, { from: voter2 })
+
+      const circuit = await compileAndLoadCircuit("../../circuits/circom/test/vote_test.circom")
+
+      const processedVotes = await arrayBatchSize.reduce(
+        async (promisedAcc, index) => {
+          const acc = await promisedAcc
+
+          if (acc.length === 0) {
+            const { input, commitment } = generateVote(tree, index, relayer, recipient, fee)
+            await instance.deposit(toHex(commitment), {from: accounts[index+1]})
+            const processedVote = processVote({
+              input,
+              tree
+			})
+            acc.push(processedVote)
+		  } else {
+            const lastAcc = acc.slice(-1)[0]
+            const { input, commitment } = generateVote(lastAcc.tree, index, relayer, recipient, fee)
+            await instance.deposit(toHex(commitment), {from: accounts[index+1]})
+            const processedVote = processVote({
+              input,
+              tree: lastAcc.tree
+			})
+            acc.push(processedVote)
+		  }
+          return acc
+		}, [])
+
+      const inputs = await processedVotes.reduce(
+        async (promisedAcc, curProcessedTx) => {
+          const { input } = curProcessedTx
+          const acc = await promisedAcc
+          const {
+            proof
+          } = await genProofAndPublicSignals(
+            input,
+            'test/vote_test.circom',
+            'build/vote.zkey',
+            'circuits/vote.wasm',
+            circuit
+          )
+
+          const proofForSolidityInput = toSolidityInput(proof)
+          input.proof = proofForSolidityInput
+
+          Object.keys(acc).forEach(k => {
+            acc[k].push(input[k])
+          })
+
+          return acc
+        },
+        {
+          proof:[],
+          root: [],
+          nullifierHash: [],
+          nullifier: [],
+          relayer: [],
+          recipient: [],
+          fee: [],
+          secret: [],
+          path_elements: [],
+          path_index: []
+        }
+      )
+
+      const tx = await instance.batchWithdraw(inputs.proof, inputs.root, inputs.nullifierHash, inputs.recipient, inputs.relayer, inputs.fee)
+      truffleAssert.eventEmitted(tx, 'Withdrawal')
     })
   })
 

@@ -15,7 +15,15 @@ module.exports = (deployer) => {
     const hasherInstance = await hasherContract.deployed()
     const {config} = require('cream-config')
     await Cream.link(hasherContract, hasherInstance.address)
-    await deployer.deploy(Cream, verifier.address, signUpToken.address, config.cream.denomination.toString(), config.cream.merkleTrees.toString(), config.cream.recipients)
+    await deployer.deploy(
+      Cream,
+      verifier.address,
+      signUpToken.address,
+      config.cream.denomination.toString(),
+      config.cream.merkleTrees.toString(),
+      config.cream.batchSize.toString(),
+      config.cream.recipients
+    )
   })
  .then(async () => {
    const basePath = path.resolve(__dirname, '../app/constants')
